@@ -1301,10 +1301,18 @@ fn launch_desktop_app(_openfang_dir: &std::path::Path) {
             ui::blank();
             if let Some(base) = find_daemon() {
                 let url = format!("{base}/");
-                let _ = open_in_browser(&url);
-                // Always print the URL — browser launch may silently fail
-                // (e.g., Chromium sandbox EPERM in containers)
+                if !open_in_browser(&url) {
+                    // Browser launch failed entirely (e.g., sandbox EPERM,
+                    // no display server, container environment).
+                    ui::hint("Could not open a browser automatically.");
+                }
+                // Always print the URL so the user can open it manually,
+                // even when open_in_browser reported success — the spawned
+                // opener may still fail asynchronously.
                 ui::hint(&format!("Dashboard: {url}"));
+            } else {
+                ui::hint("Daemon is not running. Start it with: openfang start");
+                ui::hint("Then open: http://127.0.0.1:4200");
             }
         }
     }
@@ -2974,16 +2982,31 @@ pub(crate) fn open_in_browser(url: &str) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        // Detach from parent to avoid inheriting sandbox restrictions.
-        // Some Chromium-based browsers fail with EPERM when launched from
-        // restricted environments (containers, snaps, flatpaks).
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
+        // Try multiple openers in order. xdg-open is the standard, but it
+        // (or the browser it launches) can fail with EPERM in sandboxed
+        // environments (containers, Snap, Flatpak, user-namespace
+        // restrictions). Fall through to alternatives if any opener fails.
+        let openers = [
+            "xdg-open",
+            "sensible-browser",
+            "x-www-browser",
+            "firefox",
+            "google-chrome",
+            "chromium",
+            "chromium-browser",
+        ];
+        for opener in &openers {
+            let result = std::process::Command::new(opener)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if result.is_ok() {
+                return true;
+            }
+        }
+        false
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {

@@ -6744,14 +6744,33 @@ pub async fn set_provider_key(
     // Auto-switch default provider if current default has no working key.
     // This fixes the common case where a user adds e.g. a Gemini key via dashboard
     // but their agent still tries to use the previous provider (which has no key).
-    let current_provider = &state.kernel.config.default_model.provider;
-    let current_key_env = &state.kernel.config.default_model.api_key_env;
+    //
+    // Read the effective default from the hot-reload override (if set) rather than
+    // the stale boot-time config — a previous set_provider_key call may have already
+    // switched the default.
+    let (current_provider, current_key_env) = {
+        let guard = state
+            .kernel
+            .default_model_override
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
+            None => (
+                state.kernel.config.default_model.provider.clone(),
+                state.kernel.config.default_model.api_key_env.clone(),
+            ),
+        }
+    };
     let current_has_key = if current_key_env.is_empty() {
         false
     } else {
-        std::env::var(current_key_env).is_ok()
+        std::env::var(&current_key_env)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
     };
-    let switched = if !current_has_key && *current_provider != name {
+    let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
             let catalog = state.kernel.model_catalog.read().unwrap_or_else(|e| e.into_inner());
@@ -6771,10 +6790,57 @@ pub async fn set_provider_key(
             } else {
                 let _ = std::fs::write(&config_path, update_toml);
             }
+
+            // Hot-update the in-memory default model override so resolve_driver()
+            // immediately creates drivers for the new provider — no restart needed.
+            {
+                let new_dm = openfang_types::config::DefaultModelConfig {
+                    provider: name.clone(),
+                    model: model_id,
+                    api_key_env: env_var.clone(),
+                    base_url: None,
+                };
+                let mut guard = state
+                    .kernel
+                    .default_model_override
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                *guard = Some(new_dm);
+            }
             true
         } else {
             false
         }
+    } else if current_provider == name {
+        // User is saving a key for the CURRENT default provider. The env var is
+        // already set (set_var above), but we must ensure default_model_override
+        // has the correct api_key_env so resolve_driver reads the right variable.
+        let needs_update = {
+            let guard = state
+                .kernel
+                .default_model_override
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(dm) => dm.api_key_env != env_var,
+                None => state.kernel.config.default_model.api_key_env != env_var,
+            }
+        };
+        if needs_update {
+            let mut guard = state
+                .kernel
+                .default_model_override
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let base = guard
+                .clone()
+                .unwrap_or_else(|| state.kernel.config.default_model.clone());
+            *guard = Some(openfang_types::config::DefaultModelConfig {
+                api_key_env: env_var.clone(),
+                ..base
+            });
+        }
+        false
     } else {
         false
     };
@@ -6783,7 +6849,7 @@ pub async fn set_provider_key(
     if switched {
         resp["switched_default"] = serde_json::json!(true);
         resp["message"] = serde_json::json!(
-            format!("API key saved. Default provider switched to '{}'. Restart the daemon to apply.", name)
+            format!("API key saved and default provider switched to '{}'.", name)
         );
     }
 

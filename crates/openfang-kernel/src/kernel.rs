@@ -4000,25 +4000,36 @@ impl OpenFangKernel {
 
     /// Resolve the LLM driver for an agent.
     ///
-    /// If the agent's manifest specifies a different provider than the kernel default,
-    /// a dedicated driver is created. Otherwise the kernel's default driver is reused.
+    /// Always creates a fresh driver using current environment variables so that
+    /// API keys saved via the dashboard (`set_provider_key`) take effect immediately
+    /// without requiring a daemon restart. Uses the hot-reloaded default model
+    /// override when available.
     /// If fallback models are configured, wraps the primary in a `FallbackDriver`.
     fn resolve_driver(&self, manifest: &AgentManifest) -> KernelResult<Arc<dyn LlmDriver>> {
         let agent_provider = &manifest.model.provider;
-        let default_provider = &self.config.default_model.provider;
 
-        // If agent uses same provider as kernel default and has no custom overrides, reuse
+        // Use the effective default model: hot-reloaded override takes priority
+        // over the boot-time config. This ensures that when a user saves a new
+        // API key via the dashboard and the default provider is switched,
+        // resolve_driver sees the updated provider/model/api_key_env.
+        let override_guard = self
+            .default_model_override
+            .read()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+        let effective_default = override_guard
+            .as_ref()
+            .unwrap_or(&self.config.default_model);
+        let default_provider = &effective_default.provider;
+
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
 
-        let primary = if agent_provider == default_provider && !has_custom_key && !has_custom_url {
-            Arc::clone(&self.default_driver)
-        } else {
-            // Create a dedicated driver for this agent.
-            //
-            // IMPORTANT: When the agent's provider differs from the default,
-            // we must NOT pass the default provider's API key. Instead, pass None
-            // so create_driver() can look up the correct env var for the target provider.
+        // Always create a fresh driver by reading current env vars.
+        // This ensures API keys saved at runtime (via dashboard POST
+        // /api/providers/{name}/key which calls std::env::set_var) are
+        // picked up immediately — the boot-time default_driver cache is
+        // only used as a final fallback when driver creation fails.
+        let primary = {
             let api_key = if has_custom_key {
                 // Agent explicitly set an API key env var — use it
                 manifest
@@ -4027,8 +4038,13 @@ impl OpenFangKernel {
                     .as_ref()
                     .and_then(|env| std::env::var(env).ok())
             } else if agent_provider == default_provider {
-                // Same provider — use default key
-                std::env::var(&self.config.default_model.api_key_env).ok()
+                // Same provider as effective default — use its env var
+                if !effective_default.api_key_env.is_empty() {
+                    std::env::var(&effective_default.api_key_env).ok()
+                } else {
+                    let env_var = self.config.resolve_api_key_env(agent_provider);
+                    std::env::var(&env_var).ok()
+                }
             } else {
                 // Different provider — check auth profiles, provider_api_keys,
                 // and convention-based env var. For custom providers (not in the
@@ -4041,8 +4057,7 @@ impl OpenFangKernel {
             let base_url = if has_custom_url {
                 manifest.model.base_url.clone()
             } else if agent_provider == default_provider {
-                self.config
-                    .default_model
+                effective_default
                     .base_url
                     .clone()
                     .or_else(|| self.config.provider_urls.get(agent_provider.as_str()).cloned())
@@ -4057,9 +4072,27 @@ impl OpenFangKernel {
                 base_url,
             };
 
-            drivers::create_driver(&driver_config).map_err(|e| {
-                KernelError::BootFailed(format!("Agent LLM driver init failed: {e}"))
-            })?
+            match drivers::create_driver(&driver_config) {
+                Ok(d) => d,
+                Err(e) => {
+                    // If fresh driver creation fails (e.g. key not yet set for this
+                    // provider), fall back to the boot-time default driver. This
+                    // keeps existing agents working while the user is still
+                    // configuring providers via the dashboard.
+                    if agent_provider == default_provider && !has_custom_key && !has_custom_url {
+                        debug!(
+                            provider = %agent_provider,
+                            error = %e,
+                            "Fresh driver creation failed, falling back to boot-time default"
+                        );
+                        Arc::clone(&self.default_driver)
+                    } else {
+                        return Err(KernelError::BootFailed(format!(
+                            "Agent LLM driver init failed: {e}"
+                        )));
+                    }
+                }
+            }
         };
 
         // If fallback models are configured, wrap in FallbackDriver
@@ -4851,6 +4884,10 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
+            // "kimi" is a brand alias for moonshot
+            "kimi" => {
+                return Some("moonshot".to_string());
+            }
             _ => {}
         }
     }
@@ -4884,6 +4921,8 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
         Some("qianfan".to_string())
     } else if lower.starts_with("abab") {
         Some("minimax".to_string())
+    } else if lower.starts_with("moonshot") || lower.starts_with("kimi") {
+        Some("moonshot".to_string())
     } else {
         None
     }

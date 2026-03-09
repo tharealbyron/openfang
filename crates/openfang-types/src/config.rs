@@ -1593,6 +1593,10 @@ pub struct TelegramConfig {
     pub default_agent: Option<String>,
     /// Polling interval in seconds.
     pub poll_interval_secs: u64,
+    /// Custom Telegram Bot API base URL for proxies or mirrors.
+    /// Defaults to `https://api.telegram.org` when not set.
+    #[serde(default)]
+    pub api_url: Option<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1605,6 +1609,7 @@ impl Default for TelegramConfig {
             allowed_users: vec![],
             default_agent: None,
             poll_interval_secs: 1,
+            api_url: None,
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3324,6 +3329,24 @@ mod tests {
         assert_eq!(dc.bot_token_env, "DISCORD_BOT_TOKEN");
         assert!(dc.allowed_guilds.is_empty());
         assert_eq!(dc.intents, 37376);
+        assert!(dc.ignore_bots);
+    }
+
+    #[test]
+    fn test_discord_config_ignore_bots_deserialization() {
+        let toml_str = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+            ignore_bots = false
+        "#;
+        let dc: DiscordConfig = toml::from_str(toml_str).unwrap();
+        assert!(!dc.ignore_bots);
+
+        // Default (field omitted) should be true
+        let toml_str2 = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+        "#;
+        let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
+        assert!(dc2.ignore_bots);
     }
 
     #[test]

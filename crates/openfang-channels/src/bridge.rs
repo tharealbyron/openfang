@@ -5,7 +5,10 @@
 
 use crate::formatter;
 use crate::router::AgentRouter;
-use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser};
+use crate::types::{
+    default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
+    LifecycleReaction,
+};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use openfang_types::message::ContentBlock;
@@ -380,6 +383,25 @@ async fn send_response(
     }
 }
 
+/// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
+///
+/// Silently ignores errors — reactions are non-critical UX polish.
+/// For Telegram, the underlying HTTP call is already fire-and-forget (spawned internally),
+/// so this await returns almost immediately.
+async fn send_lifecycle_reaction(
+    adapter: &dyn ChannelAdapter,
+    user: &ChannelUser,
+    message_id: &str,
+    phase: AgentPhase,
+) {
+    let reaction = LifecycleReaction {
+        emoji: default_phase_emoji(&phase).to_string(),
+        phase,
+        remove_previous: true,
+    };
+    let _ = adapter.send_reaction(user, message_id, &reaction).await;
+}
+
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
@@ -698,15 +720,22 @@ async fn dispatch_message(
     // Send typing indicator (best-effort)
     let _ = adapter.send_typing(&message.sender).await;
 
+    // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
+    let msg_id = &message.platform_message_id;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+
     // Send to agent and relay response
     match handle.send_message(agent_id, &text).await {
         Ok(response) => {
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             send_response(adapter, &message.sender, response, thread_id, output_format).await;
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None)
                 .await;
         }
         Err(e) => {
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Error).await;
             warn!("Agent error for {agent_id}: {e}");
             let err_msg = format!("Agent error: {e}");
             send_response(
@@ -880,14 +909,21 @@ async fn dispatch_with_blocks(
 
     let _ = adapter.send_typing(&message.sender).await;
 
+    // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
+    let msg_id = &message.platform_message_id;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+
     match handle.send_message_with_blocks(agent_id, blocks).await {
         Ok(response) => {
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             send_response(adapter, &message.sender, response, thread_id, output_format).await;
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None)
                 .await;
         }
         Err(e) => {
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Error).await;
             warn!("Agent error for {agent_id}: {e}");
             let err_msg = format!("Agent error: {e}");
             send_response(

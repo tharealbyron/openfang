@@ -790,7 +790,8 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("qwen", "qwen-plus"),
         ("glm", "glm-5-20250605"),
         ("ernie", "ernie-4.5-8k"),
-        ("kimi", "kimi-k2-0711"),
+        ("kimi", "kimi-k2"),
+        ("moonshot", "moonshot-v1-128k"),
         ("minimax", "MiniMax-M2.5"),
         ("minimax-m2.5", "MiniMax-M2.5"),
         ("minimax-m2.1", "MiniMax-M2.1"),
@@ -2910,7 +2911,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         ModelCatalogEntry {
-            id: "kimi-k2-0711".into(),
+            id: "kimi-k2".into(),
             display_name: "Kimi K2".into(),
             provider: "moonshot".into(),
             tier: ModelTier::Frontier,
@@ -2921,10 +2922,10 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
-            aliases: vec!["kimi-k2".into()],
+            aliases: vec![],
         },
         ModelCatalogEntry {
-            id: "kimi-k2.5-0711".into(),
+            id: "kimi-k2.5".into(),
             display_name: "Kimi K2.5".into(),
             provider: "moonshot".into(),
             tier: ModelTier::Frontier,
@@ -2935,7 +2936,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
-            aliases: vec!["kimi-k2.5".into()],
+            aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
         // Baidu Qianfan / ERNIE (3)

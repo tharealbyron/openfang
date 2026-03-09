@@ -1066,6 +1066,7 @@ pub async fn start_channel_bridge_with_config(
                 token,
                 tg_config.allowed_users.clone(),
                 poll_interval,
+                tg_config.api_url.clone(),
             ));
             adapters.push((adapter, tg_config.default_agent.clone()));
         }
